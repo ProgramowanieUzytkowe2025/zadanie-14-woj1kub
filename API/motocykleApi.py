@@ -1,10 +1,12 @@
 import uvicorn
 from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy import create_engine, select
 from pydantic import BaseModel
 from typing import List, Optional
 import urllib.parse
+import time
 
 from marki import Marka, Base
 
@@ -54,6 +56,15 @@ def get_db():
 
 app = FastAPI()
 
+# Pozwól na żądania z aplikacji frontendowej (np. React na porcie 3000)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 @app.post("/marki/", response_model=MarkaResponse, status_code=status.HTTP_201_CREATED)
 def create_marka(marka: MarkaCreate, db: Session = Depends(get_db)):
@@ -69,14 +80,18 @@ def create_marka(marka: MarkaCreate, db: Session = Depends(get_db)):
     return db_marka
 
 @app.get("/marki/", response_model=List[MarkaResponse])
-def read_marki(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
-    """Pobiera listę wszystkich marek."""
-    marki = db.execute(select(Marka).order_by(Marka.id).offset(skip).limit(limit)).scalars().all()
+def read_marki(skip: int = 0, limit: int = 100, czy_istnieje: Optional[bool] = None, db: Session = Depends(get_db)):
+    """Pobiera listę marek z opcjonalnym filtrem po polu `czy_istnieje`."""
+    stmt = select(Marka).order_by(Marka.id)
+    if czy_istnieje is not None:
+        stmt = stmt.filter(Marka.czy_istnieje == czy_istnieje)
+    marki = db.execute(stmt.offset(skip).limit(limit)).scalars().all()
     return marki
 
 @app.get("/marki/{marka_id}", response_model=MarkaResponse)
 def read_marka(marka_id: int, db: Session = Depends(get_db)):
     """Pobiera jedną markę po jej ID."""
+    time.sleep(2)  # Sztuczne opóźnienie 2 sekundy
     db_marka = db.get(Marka, marka_id)
     if db_marka is None:
         raise HTTPException(status_code=404, detail="Marka nie została znaleziona.")
@@ -90,6 +105,10 @@ def update_marka(marka_id: int, marka: MarkaUpdate, db: Session = Depends(get_db
         raise HTTPException(status_code=404, detail="Marka nie została znaleziona.")
     
     update_data = marka.model_dump(exclude_unset=True)
+    # Serwerowa walidacja: nie pozwalamy na ustawienie zbyt małego roku założenia
+    if 'rok_zalozenia' in update_data and update_data['rok_zalozenia'] is not None:
+        if update_data['rok_zalozenia'] < 1900:
+            raise HTTPException(status_code=400, detail='rok_zalozenia musi być >= 1900')
     for key, value in update_data.items():
         setattr(db_marka, key, value)
     
@@ -104,6 +123,9 @@ def delete_marka(marka_id: int, db: Session = Depends(get_db)):
     db_marka = db.get(Marka, marka_id)
     if db_marka is None:
         raise HTTPException(status_code=404, detail="Marka nie została znaleziona.")
+    # Nie pozwalamy na usunięcie rekordu, jeśli pole `czy_istnieje` jest False
+    if not db_marka.czy_istnieje:
+        raise HTTPException(status_code=400, detail="Nie można usunąć rekordu oznaczonego jako nieistniejący")
     db.delete(db_marka)
     db.commit()
     return None
